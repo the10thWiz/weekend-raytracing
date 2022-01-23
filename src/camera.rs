@@ -6,50 +6,51 @@
 
 use std::io::Write;
 
-use crate::{Vec3, ASPECT_RATIO, Ray, image::Pixel};
+use crate::{
+    image::{Image, Pixel},
+    Ray, Vec3,
+};
 
-pub struct Camera {
-    viewport_width: f64,
-    viewport_height: f64,
-    focal_length: f64,
+use crate::builder;
 
-    origin: Vec3,
-    horizontal: Vec3,
-    vertical: Vec3,
-    lower_left_corner: Vec3,
-    samples: usize,
-    upixel: f64,
-    vpixel: f64,
-}
+builder!(pub CameraBuilder => pub Camera {
+    builder {
+        /// the direction the camera is facing
+        forward: Vec3 = Vec3::new(0.0, 0.0, 1.0),
+        /// width of the viewport in scene units
+        viewport_width: f64 = 2.0,
+        /// focal length in scene units
+        focal_length: f64 = 1.0,
+    }
+    shared {
+        /// Camera Origin
+        origin: Vec3 = Vec3::new(0.0, 0.0, 0.0),
+        /// Up direction
+        vertical: Vec3 = Vec3::new(0.0, 1.0, 0.0),
+        /// Number of samples per pixel
+        samples: usize = 4,
+    }
+    constructor(image: &Image<impl Write>) {
+        let viewport_height = viewport_width / (image.width() as f64 / image.height() as f64);
+        let horizontal = forward.cross(&vertical) * viewport_width;
+        let vertical = vertical * viewport_height;
+        let forward = forward * focal_length;
+        let lower_left_corner = origin - horizontal/2.0 - vertical/2.0 + forward;
+    }
+    computed {
+        horizontal: Vec3,
+        lower_left_corner: Vec3,
+        upixel: f64 = 1.0 / (image.width() as f64),
+        vpixel: f64 = 1.0 / (image.height() as f64),
+    }
+});
 
 impl Camera {
-    pub fn new(width: usize, height: usize) -> Self {
-        let viewport_width = 2.0;
-        let viewport_height = viewport_width / ASPECT_RATIO;
-        let focal_length = 1.0;
-
-        let origin = Vec3::new(0.0, 0.0, 0.0);
-        let horizontal = Vec3::new(viewport_width, 0.0, 0.0);
-        let vertical = Vec3::new(0.0, viewport_height, 0.0);
-        let lower_left_corner = origin - horizontal/2.0 - vertical/2.0 - Vec3::new(0.0, 0.0, focal_length);
-        Self {
-            viewport_width,
-            viewport_height,
-            focal_length,
-            origin,
-            horizontal,
-            vertical,
-            lower_left_corner,
-            samples: 1,
-            upixel: 1.0 / (width as f64),
-            vpixel: 1.0 / (height as f64),
-        }
-    }
-
     pub fn pixel_rays(&self, pixel: &Pixel<impl Write>) -> RayIter<'_> {
         RayIter {
             camera: self,
-            u: pixel.u(), v: pixel.v(),
+            u: pixel.u(),
+            v: pixel.v(),
             cur: 0,
         }
     }
@@ -75,8 +76,8 @@ impl<'s> Iterator for RayIter<'s> {
             let ray = Ray {
                 origin: self.camera.origin,
                 dir: self.camera.lower_left_corner
-                    + self.camera.horizontal*u
-                    + self.camera.vertical*v
+                    + self.camera.horizontal * u
+                    + self.camera.vertical * v
                     - self.camera.origin,
             };
             self.cur += 1;

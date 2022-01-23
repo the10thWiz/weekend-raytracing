@@ -4,26 +4,47 @@
 // Distributed under terms of the MIT license.
 //
 
+use ouroboros::self_referencing;
 use png::{StreamWriter, Writer};
 
 use crate::Vec3;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::sync::{Arc, Mutex};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
-pub struct Image<W: Write> {
-    w: Writer<W>,
+pub struct Image<W: Write + 'static> {
     width: usize,
     height: usize,
-    writer: bool,
+    row: usize,
+    col: usize,
+    start: Instant,
+    last: Instant,
+    inner: ImageInner<W>
+}
+
+#[self_referencing]
+pub struct ImageInner<W: Write + 'static> {
+    w: Writer<W>,
+    #[borrows(mut w)]
+    #[covariant]
+    writer: StreamWriter<'this, W>,
 }
 
 impl Image<BufWriter<File>> {
-    pub fn new(width: usize, height: usize) -> Self {
-        let file = File::create("result.png").unwrap();
-        let w = BufWriter::new(file);
+    pub fn default_file(width: usize, height: usize) -> Self {
+        Self::file(width, height, "result.png")
+    }
 
+    pub fn file(width: usize, height: usize, file: impl AsRef<Path>) -> Self {
+        let file = File::create(file).unwrap();
+        let w = BufWriter::new(file);
+        Self::writer(width, height, w)
+    }
+}
+
+impl<W: Write + 'static> Image<W> {
+    pub fn writer(width: usize, height: usize, w: W) -> Self {
         let mut encoder = png::Encoder::new(w, width as u32, height as u32);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
@@ -41,47 +62,21 @@ impl Image<BufWriter<File>> {
         let w = encoder.write_header().unwrap();
         //let writer = w.stream_writer().unwrap();
         println!("Wrote Header");
-        Self {
-            w,
+        Image {
             width,
             height,
-            writer: false,
-        }
-    }
-}
-
-impl<W: Write> Image<W> {
-    pub fn iter<'a>(&'a mut self) -> PixelIter<'a, W> {
-        assert!(!self.writer, "Only one writer per image may be created");
-        self.writer = true;
-        PixelIter {
-            width: self.width,
-            height: self.height,
             row: 0,
             col: 0,
             start: Instant::now(),
             last: Instant::now(),
-            writer: self.writer(),
+            inner: ImageInnerBuilder {
+                w,
+                writer_builder: |w| w.stream_writer().unwrap(),
+            }.build()
         }
     }
 
-    fn writer<'a>(&'a mut self) -> StreamWriter<'a, W> {
-        self.w.stream_writer().unwrap()
-    }
-}
-
-pub struct PixelIter<'a, W: Write> {
-    width: usize,
-    height: usize,
-    row: usize,
-    col: usize,
-    start: Instant,
-    last: Instant,
-    writer: StreamWriter<'a, W>,
-}
-
-impl<'a, W: Write> PixelIter<'a, W> {
-    pub fn next<'i>(&'i mut self) -> Option<Pixel<'i, 'a, W>> {
+    pub fn next<'i: 'o, 'o>(&'i mut self) -> Option<Pixel<'o, W>> {
         if self.last.elapsed() > Duration::from_secs(1) {
             let pixel_id = self.row * self.width + self.col;
             let max = self.width * self.height;
@@ -103,7 +98,7 @@ impl<'a, W: Write> PixelIter<'a, W> {
                 v,
                 samples: 0,
                 color: Vec3::new(0.0, 0.0, 0.0),
-                image: &mut self.writer,
+                image: &mut self.inner,
             })
         }
     }
@@ -111,24 +106,28 @@ impl<'a, W: Write> PixelIter<'a, W> {
     pub fn elapsed(&self) -> Duration {
         self.start.elapsed()
     }
+
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    pub fn height(&self) -> usize {
+        self.height
+    }
 }
 
-pub struct Pixel<'i, 'a, W: Write> {
+pub struct Pixel<'i, W: Write + 'static> {
     u: f64,
     v: f64,
     samples: usize,
     color: Vec3,
-    image: &'i mut StreamWriter<'a, W>,
+    image: &'i mut ImageInner<W>,
 }
 
-impl<'i, 'a, W: Write> Pixel<'i, 'a, W> {
+impl<'i, W: Write> Pixel<'i, W> {
     pub fn add_sample(&mut self, color: Vec3) {
         self.samples += 1;
         self.color += color;
-    }
-
-    pub fn samples(&self) -> usize {
-        self.samples
     }
 
     pub fn u(&self) -> f64 {
@@ -139,16 +138,16 @@ impl<'i, 'a, W: Write> Pixel<'i, 'a, W> {
     }
 }
 
-impl<'i, 'a, W: Write> Drop for Pixel<'i, 'a, W> {
+impl<'i, W: Write> Drop for Pixel<'i, W> {
     fn drop(&mut self) {
-        //println!("Writing pixel");
-        self.image
-            .write_all(&[
+        self.color /= self.samples as f64;
+        self.image.with_writer_mut(|image|
+            image.write_all(&[
                 (self.color.x * 256.0) as u8,
                 (self.color.y * 256.0) as u8,
                 (self.color.z * 256.0) as u8,
                 255u8,
             ])
-            .unwrap();
+            .unwrap());
     }
 }

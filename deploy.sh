@@ -7,4 +7,4 @@
 #
 
 
-cargo +nightly run && wsl_run files result.png
+cargo run && wsl_run files result.png
